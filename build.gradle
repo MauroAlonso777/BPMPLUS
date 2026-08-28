@@ -58,6 +58,7 @@ dependencies {
     runtimeOnly "com.h2database:h2"
     runtimeOnly "com.zaxxer:HikariCP"
     runtimeOnly "cloud.wondrify:asset-pipeline-grails"
+    runtimeOnly 'com.mysql:mysql-connector-j'
     testAndDevelopmentOnly "org.webjars.npm:bootstrap"
     testAndDevelopmentOnly "org.webjars.npm:bootstrap-icons"
     testAndDevelopmentOnly "org.webjars.npm:jquery"
