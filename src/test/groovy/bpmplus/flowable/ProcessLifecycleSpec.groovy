@@ -10,6 +10,9 @@ import grails.gorm.annotation.Entity
 import grails.gorm.multitenancy.Tenants
 
 import org.flowable.engine.ProcessEngine
+import org.flowable.engine.RepositoryService
+import org.flowable.engine.RuntimeService
+import org.flowable.engine.TaskService
 import org.flowable.engine.delegate.DelegateExecution
 import org.flowable.engine.runtime.ProcessInstance
 import org.flowable.task.api.Task
@@ -268,6 +271,68 @@ class ProcessLifecycleSpec extends Specification {
         expect:
         asUserOf(ACME) { engine.historyService.createHistoricProcessInstanceQuery().count() } == 1L
         asUserOf(GLOBEX) { engine.historyService.createHistoricProcessInstanceQuery().count() } == 0L
+    }
+
+
+    // --- la capa que expone el motor por HTTP (ProcesoService) ---
+
+    void 'ProcesoService lista las definiciones desplegadas en el cliente'() {
+        expect:
+        asUserOf(ACME) { procesoService().definiciones()*.clave }.sort() == ['expediente', 'spikeAislamiento']
+    }
+
+    void 'ProcesoService arranca, lista, completa'() {
+        given:
+        Map arranque = asUserOf(ACME) {
+            procesoService().iniciar(PROCESS_KEY, 'EXP-100', [responsable: 'ana', referencia: 'R-100'])
+        }
+
+        expect: 'la instancia existe y se la encuentra por su referencia de negocio'
+        arranque.id
+        asUserOf(ACME) { procesoService().instancias() }*.referencia == ['EXP-100']
+
+        when: 'se completa la tarea pendiente'
+        Map tarea = asUserOf(ACME) { procesoService().tareas('ana') }.first()
+        asUserOf(ACME) { procesoService().completar(tarea.id as String, [aprobado: true]) }
+
+        then: 'el proceso termino'
+        asUserOf(ACME) { procesoService().instancias() } == []
+    }
+
+    void 'ProcesoService no deja ver ni completar lo de otro cliente'() {
+        given:
+        asUserOf(ACME) {
+            procesoService().iniciar(PROCESS_KEY, 'SOLO-ACME', [responsable: 'ana', referencia: 'R-200'])
+        }
+        String tareaDeAcme = asUserOf(ACME) { procesoService().tareas() }.first().id as String
+
+        expect: 'globex no la ve'
+        asUserOf(GLOBEX) { procesoService().instancias() } == []
+        asUserOf(GLOBEX) { procesoService().tareas() } == []
+
+        when: 'ni la puede completar con su id'
+        asUserOf(GLOBEX) { procesoService().completar(tareaDeAcme, [:]) }
+
+        then:
+        thrown(Exception)
+
+        and: 'y para acme sigue pendiente'
+        asUserOf(ACME) { procesoService().tareas() }.size() == 1
+    }
+
+    /**
+     * El ProcesoService que usa el controller, apoyado sobre el motor de este spec. Se sustituye
+     * ProcessEngineService porque aca no hay contexto de Spring; lo que se prueba es la capa de
+     * arriba, no como se construye el motor.
+     */
+    private static ProcesoService procesoService() {
+        ProcessEngineService motor = new ProcessEngineService() {
+            @Override ProcessEngine getProcessEngine() { engine }
+            @Override RepositoryService getRepositoryService() { engine.repositoryService }
+            @Override RuntimeService getRuntimeService() { engine.runtimeService }
+            @Override TaskService getTaskService() { engine.taskService }
+        }
+        new ProcesoService(processEngineService: motor)
     }
 
     // --- helpers ---

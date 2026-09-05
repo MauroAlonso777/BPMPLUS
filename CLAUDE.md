@@ -323,6 +323,36 @@ Apareció al meter los scripts de Flowable, que son los primeros `<sqlFile>` del
 cubre el caso `el esquema de Flowable no se crea en la base maestra` de
 `FlowableTenantIsolationSpec`.
 
+### La API de procesos
+
+Añadida **fuera del plan**, por una razón concreta: el plan cubre las siete fases y deja el motor
+embebido y funcionando, pero sin ninguna superficie HTTP. El despliegue arrancaba, enganchaba los
+tenants y no había forma de ejecutar nada en él.
+
+`ProcesoController` (delgado, sólo traduce request y respuesta) sobre `ProcesoService` (las
+operaciones, devolviendo mapas planos para que los tipos de Flowable no lleguen a la capa web):
+
+| | |
+| --- | --- |
+| `GET /proceso/definiciones` | procesos desplegados, última versión |
+| `GET /proceso/instancias` | instancias en curso |
+| `GET /proceso/tareas?asignadoA=` | tareas pendientes |
+| `POST /proceso/iniciar/<clave>` | arranca; cuerpo `{"referencia": "...", "variables": {...}}` |
+| `POST /proceso/completar/<idTarea>` | completa; cuerpo `{"variables": {...}}` |
+
+**Ninguna acepta el tenant como parámetro.** Lo resuelve el `TenantResolver` a partir del usuario
+autenticado; una cuenta de plataforma elige con `X-Tenant-Id`, que el resolver acepta sólo para
+esas cuentas. Aceptarlo por parámetro abriría exactamente el agujero que todo el diseño evita.
+
+Códigos de respuesta que importan:
+
+- **404** cuando lo pedido no existe *en la base de ese cliente*. Incluye el caso de usar el id de
+  una tarea de otro cliente: como el aislamiento es físico, el motor no la encuentra, y para quien
+  llama es indistinguible de que no exista. Antes salía 500, que además sugería un problema del
+  servidor.
+- **403** cuando no se pudo resolver el tenant: o faltan credenciales útiles, o se pidió un tenant
+  que no corresponde.
+
 ### Una conexión no puede volver al pool apuntando a un tenant
 
 Es el fallo más caro que apareció en todo esto, y se veía como un error de login:

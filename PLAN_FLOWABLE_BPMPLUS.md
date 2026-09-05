@@ -322,7 +322,7 @@ la máquina de desarrollo no hay a dónde desplegar. Lo comprobado el 2026-09-05
 | Base de datos de producción (`MYSQL_HOST`, `MYSQL_DATABASE`) | ❌ sin definir |
 | Registro de imágenes | ❌ sin definir |
 | Rama mergeada a `main` | ❌ el trabajo está en una rama aparte |
-| Ensayo del despliegue en local | ✅ runbook completo, ver más abajo |
+| Ensayo del despliegue en local | ✅ runbook completo + un proceso ejecutado por HTTP |
 
 El único MySQL alcanzable es el `localhost` de desarrollo. Ejecutar el deploy contra eso no sería
 pasar a producción: sería migrar la base de desarrollo con los changesets de producción.
@@ -404,6 +404,42 @@ empaquetada, en modo producción y con varios tenants enganchados.
    probando a usarlo, y el `DataSource` que entrega es un `LazyConnectionDataSourceProxy`, donde
    `setCatalog` sólo se anota. Por eso el handler hace las dos cosas: `USE` para fallar a tiempo,
    `setCatalog` para que el driver y el pool se enteren.
+
+### Ejecutar un proceso en la versión local
+
+El plan no incluía una API, así que el despliegue arrancaba pero no había forma de ejecutar nada
+en él. Se agregó una capa mínima (`ProcesoController` + `ProcesoService`, ver `CLAUDE.md`) y se
+ejecutó un proceso completo por HTTP contra el despliegue local, autenticado como cuenta de
+plataforma y eligiendo cliente con `X-Tenant-Id`:
+
+```bash
+curl -c ck -d "username=plataforma&password=..." localhost:8080/login/authenticate
+
+A() { curl -s -b ck -H "X-Tenant-Id: acme"   -H "Content-Type: application/json" "$@"; }
+G() { curl -s -b ck -H "X-Tenant-Id: globex" -H "Content-Type: application/json" "$@"; }
+
+A -X POST -d '{"referencia":"EXP-2026-001"}' localhost:8080/proceso/iniciar/spikeAislamiento
+A localhost:8080/proceso/instancias
+G localhost:8080/proceso/instancias
+```
+
+| Paso | Resultado |
+| --- | --- |
+| `acme` inicia el proceso | ✅ instancia creada, referencia `EXP-2026-001` |
+| Instancias de `acme` | ✅ la suya |
+| Instancias de `globex` | ✅ `[]` |
+| Tareas de `acme` / de `globex` | ✅ una / ninguna |
+| `globex` completa la tarea de `acme` con su id | ✅ **404**, y sigue pendiente para `acme` |
+| `acme` la completa | ✅ 200, el proceso termina |
+| Sin autenticar | ✅ 302 al login |
+
+Ese ensayo encontró una cosa más: el intento de un cliente sobre la tarea de otro devolvía **500**.
+El aislamiento se cumplía —el motor no encuentra la tarea, está en otra base—, pero el código era
+el equivocado. Ahora es 404.
+
+El diagrama usado era un fixture de pruebas, montado sólo para el ensayo y quitado después:
+`src/main/resources/processes/` queda con su `README.md` y ningún proceso. Los procesos de negocio
+se agregan ahí siguiendo esa convención.
 
 ### Qué falta decidir antes del primer despliegue
 
