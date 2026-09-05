@@ -6,7 +6,7 @@ info:
         grailsVersion: '@info.app.grailsVersion@'
 grails:
     codegen:
-        defaultPackage: proyecto001
+        defaultPackage: bpmplus
     profile: web
 
 ---
@@ -41,49 +41,145 @@ grails:
             htmlcodec: xml
             codecs:
                 scriptlet: html
-
 ---
+# La autoconfiguracion de Liquibase de Spring Boot corre un solo changelog sobre un solo
+# schema. Aca los changelogs son dos y hay que recorrer N schemas, asi que la ejecuta
+# SchemaMigrationService desde BootStrap y desde el alta de cada tenant.
+spring:
+    liquibase:
+        enabled: false
+
 hibernate:
     cache:
         queries: false
         use_second_level_cache: false
         use_query_cache: false
+
+grails:
+    gorm:
+        multiTenancy:
+            # Un schema (base MySQL) por tenant, compartiendo la conexion y el pool.
+            mode: SCHEMA
+            tenantResolverClass: bpmplus.multitenancy.TenantRegistryResolver
+
 dataSource:
     pooled: true
     jmxExport: true
     driverClassName: com.mysql.cj.jdbc.Driver
-    dialect: org.hibernate.dialect.MySQLDialect
-    username: root
+    # MySQLDialect (Hibernate 5) es el dialecto legacy de MySQL 5.0: genera DDL con
+    # "type=MyISAM", sintaxis eliminada en MySQL 5.5. MySQL8Dialect genera engine=InnoDB.
+    dialect: org.hibernate.dialect.MySQL8Dialect
+    # El DefaultSchemaHandler de GORM emite SET SCHEMA y no funciona en MySQL.
+    schemaHandler: bpmplus.multitenancy.MySqlSchemaHandler
+    username: ${MYSQL_USER:root}
     password: ${MYSQL_PASSWORD:}
 
 environments:
     development:
         dataSource:
-            dbCreate: update
-            url: jdbc:mysql://localhost:3306/proyecto001?useUnicode=yes&characterEncoding=UTF-8&serverTimezone=UTC
+            # El esquema lo gobierna Liquibase, no Hibernate.
+            dbCreate: none
+            url: jdbc:mysql://${MYSQL_HOST:localhost}:${MYSQL_PORT:3306}/${MYSQL_DATABASE:bpmplus}?useUnicode=yes&characterEncoding=UTF-8&serverTimezone=UTC
     test:
         dataSource:
-            dbCreate: update
-            url: jdbc:h2:mem:testDb;LOCK_TIMEOUT=10000;DB_CLOSE_ON_EXIT=FALSE
+            # El esquema lo gobierna Liquibase, no Hibernate.
+            dbCreate: none
+            url: jdbc:mysql://${MYSQL_HOST:localhost}:${MYSQL_PORT:3306}/${MYSQL_DATABASE:bpmplus_test}?useUnicode=yes&characterEncoding=UTF-8&serverTimezone=UTC
     production:
         dataSource:
+            # El esquema lo gobierna la herramienta de migraciones, no Hibernate.
             dbCreate: none
-            url: jdbc:h2:./prodDb;LOCK_TIMEOUT=10000;DB_CLOSE_ON_EXIT=FALSE
+            url: jdbc:mysql://${MYSQL_HOST}:${MYSQL_PORT:3306}/${MYSQL_DATABASE}?useUnicode=yes&characterEncoding=UTF-8&serverTimezone=UTC
             properties:
-                jmxEnabled: true
-                initialSize: 5
-                maxActive: 50
-                minIdle: 5
-                maxIdle: 25
-                maxWait: 10000
-                maxAge: 600000
-                timeBetweenEvictionRunsMillis: 5000
-                minEvictableIdleTimeMillis: 60000
-                validationQuery: SELECT 1
-                validationQueryTimeout: 3
-                validationInterval: 15000
-                testOnBorrow: true
-                testWhileIdle: true
-                testOnReturn: false
-                jdbcInterceptors: ConnectionState
-                defaultTransactionIsolation: 2 # TRANSACTION_READ_COMMITTED
+                # Propiedades de HikariCP, que es el pool que realmente se usa: en el
+                # classpath no esta tomcat-jdbc, asi que DataSourceBuilder elige Hikari.
+                # Las propiedades anteriores (initialSize, maxActive, jdbcInterceptors...)
+                # eran de Tomcat JDBC y se descartaban en silencio.
+                maximumPoolSize: 50
+                minimumIdle: 5
+                connectionTimeout: 10000
+                validationTimeout: 3000
+                idleTimeout: 600000
+                maxLifetime: 1800000
+                keepaliveTime: 300000
+                connectionTestQuery: SELECT 1
+                transactionIsolation: TRANSACTION_READ_COMMITTED
+                poolName: bpmplus-pool
+
+---
+# Añadido por el plugin Spring Security Core.
+# La indentacion que genero s2-quickstart estaba mal: dejaba authority,
+# controllerAnnotations y filterChain colgando de grails.plugin en vez de
+# grails.plugin.springsecurity, con lo que el plugin los ignoraba.
+grails:
+    plugin:
+        springsecurity:
+            userLookup:
+                userDomainClassName: 'bpmplus.security.User'
+                authorityJoinClassName: 'bpmplus.security.UserRole'
+            authority:
+                className: 'bpmplus.security.Role'
+            controllerAnnotations:
+                staticRules:
+                    - pattern: /
+                      access: ['permitAll']
+                    - pattern: /error
+                      access: ['permitAll']
+                    - pattern: /index
+                      access: ['permitAll']
+                    - pattern: /index.gsp
+                      access: ['permitAll']
+                    - pattern: /shutdown
+                      access: ['permitAll']
+                    - pattern: /assets/**
+                      access: ['permitAll']
+                    - pattern: /**/js/**
+                      access: ['permitAll']
+                    - pattern: /**/css/**
+                      access: ['permitAll']
+                    - pattern: /**/images/**
+                      access: ['permitAll']
+                    - pattern: /**/favicon.ico
+                      access: ['permitAll']
+                    # Login y logout: sin esto no se puede llegar al formulario,
+                    # porque rejectIfNoRule esta activo por defecto.
+                    - pattern: /login/**
+                      access: ['permitAll']
+                    - pattern: /logout/**
+                      access: ['permitAll']
+                    # Consola de administracion del plugin Spring Security UI.
+                    # Sus controllers no llevan @Secured, asi que la regla va aca.
+                    - pattern: /user/**
+                      access: ['ROLE_ADMIN']
+                    - pattern: /role/**
+                      access: ['ROLE_ADMIN']
+                    - pattern: /registrationCode/**
+                      access: ['ROLE_ADMIN']
+                    - pattern: /persistentLogin/**
+                      access: ['ROLE_ADMIN']
+                    - pattern: /requestmap/**
+                      access: ['ROLE_ADMIN']
+                    - pattern: /securityInfo/**
+                      access: ['ROLE_ADMIN']
+            filterChain:
+                chainMap:
+                    - pattern: /assets/**
+                      filters: none
+                    - pattern: /**/js/**
+                      filters: none
+                    - pattern: /**/css/**
+                      filters: none
+                    - pattern: /**/images/**
+                      filters: none
+                    - pattern: /**/favicon.ico
+                      filters: none
+                    - pattern: /**
+                      filters: JOINED_FILTERS
+            ui:
+                # El alta por autoservicio y el "olvide mi clave" mandan mail y necesitan
+                # un mailSender configurado. Se dejan apagados: en un SaaS B2B las altas
+                # las hace un administrador desde /user.
+                register:
+                    requireEmailValidation: false
+                forgotPassword:
+                    requireForgotPassEmailValidation: false

@@ -1,4 +1,4 @@
-package proyecto001
+package bpmplus
 
 class UrlMappings {
 

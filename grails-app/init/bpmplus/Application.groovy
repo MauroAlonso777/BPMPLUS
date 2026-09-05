@@ -1,4 +1,4 @@
-package proyecto001
+package bpmplus
 
 import grails.boot.GrailsApp
 import grails.boot.config.GrailsAutoConfiguration

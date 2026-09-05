@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Esquema que se replica dentro del schema de CADA tenant.
+  Aca van las tablas de las entidades que implementan MultiTenant.
+
+  Este changelog es el unico mecanismo que crea esas tablas: GORM no lo hace. En
+  addTenantForSchemaInternal guarda Environment.DEFAULT_SCHEMA ("hibernate.default_schema")
+  dentro del mapa HibernateSettings, y toProperties() vuelve a prefijar todas sus claves con
+  "hibernate.", de modo que Hibernate recibe "hibernate.hibernate.default_schema" y la ignora;
+  el hbm2ddl del datastore hijo termina apuntando al schema por defecto. El aislamiento en
+  runtime no se ve afectado, porque lo da el USE <schema> por conexion.
+
+  Todavia no hay ninguna entidad MultiTenant, asi que no hay changesets. La primera entidad
+  de negocio agrega el suyo aca, no en el changelog maestro.
+
+  Reglas para changesets nuevos:
+
+  - Rollback: Liquibase deduce solo el rollback de los cambios estructurales (createTable,
+    addColumn, addForeignKeyConstraint, createIndex...). Un changeset con <sql>, <update>,
+    <delete> o <insert> NO es reversible por si solo y tiene que declarar su <rollback>
+    explicito, si no `./gradlew dbRollback` falla al llegar a el.
+  - Contexto: un changeset sin `context` se aplica en todos los entornos. Los que solo valgan
+    para uno lo declaran, por ejemplo context="development". Ojo: si se corre Liquibase sin
+    contexto, se aplican TODOS, incluidos esos; por eso SchemaMigrator exige contexto.
+-->
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+            http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.32.xsd">
+
+</databaseChangeLog>

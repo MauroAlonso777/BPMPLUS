@@ -14,7 +14,7 @@ buildscript {
 }
 
 version = "0.1"
-group = "proyecto001"
+group = "bpmplus"
 
 apply plugin:"eclipse"
 apply plugin:"idea"
@@ -50,12 +50,14 @@ dependencies {
     implementation "org.apache.grails:grails-layout"
     implementation "org.apache.grails:grails-interceptors"
     implementation "org.apache.grails:grails-scaffolding"
+    implementation "org.apache.grails:grails-spring-security:7.0.2"
+    implementation "org.apache.grails:grails-spring-security-ui:7.0.2"
+    implementation "org.liquibase:liquibase-core:4.32.0"
     implementation "org.apache.grails:grails-data-hibernate5"
     implementation "org.apache.grails:grails-gsp"
     integrationTestImplementation testFixtures("org.apache.grails:grails-geb")
     profile "org.apache.grails.profiles:web"
     runtimeOnly "org.fusesource.jansi:jansi"
-    runtimeOnly "com.h2database:h2"
     runtimeOnly "com.zaxxer:HikariCP"
     runtimeOnly "cloud.wondrify:asset-pipeline-grails"
     runtimeOnly 'com.mysql:mysql-connector-j'
@@ -68,6 +70,36 @@ dependencies {
 }
 
 compileJava.options.release = 17
+
+// Paso de deploy: aplica las migraciones al schema maestro y al de CADA tenant del registro,
+// con la aplicacion apagada. Se configura con las mismas variables de entorno que
+// application.yml (MYSQL_HOST, MYSQL_PORT, MYSQL_DATABASE, MYSQL_USER, MYSQL_PASSWORD).
+// Tareas de base de datos. Todas recorren el schema maestro y TODOS los tenants del registro.
+//
+// Conexion: variables de entorno MYSQL_HOST, MYSQL_PORT, MYSQL_DATABASE, MYSQL_USER,
+// MYSQL_PASSWORD, las mismas que usa application.yml.
+//
+// Contexto de Liquibase: -Penv=<entorno>, o si no la variable GRAILS_ENV. Decide que
+// changesets aplican; el pipeline de deploy tiene que apuntar a produccion, si no se
+// aplicarian tambien los changesets marcados para desarrollo.
+def dbTask = { String taskName, String desc, List<String> arguments ->
+    tasks.register(taskName, JavaExec) {
+        group = 'database'
+        description = desc
+        classpath = sourceSets.main.runtimeClasspath
+        mainClass = 'bpmplus.migration.MigrationRunner'
+        args = arguments
+        if (project.hasProperty('env')) {
+            systemProperty 'GRAILS_ENV', project.property('env')
+        }
+    }
+}
+
+dbTask('dbMigrate', 'Aplica las migraciones al schema maestro y al de cada tenant', ['migrate'])
+dbTask('dbTag', 'Etiqueta el estado actual del maestro y de cada tenant (-Ptag=<etiqueta>)',
+        ['tag', (project.findProperty('tag') ?: '') as String])
+dbTask('dbRollback', 'Revierte el maestro y cada tenant hasta una etiqueta (-Ptag=<etiqueta>)',
+        ['rollback', (project.findProperty('tag') ?: '') as String])
 
 tasks.withType(Test).configureEach {
     useJUnitPlatform()
