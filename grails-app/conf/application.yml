@@ -49,6 +49,16 @@ spring:
     liquibase:
         enabled: false
 
+management:
+    endpoint:
+        health:
+            # El detalle del health incluye los codigos de tenant enganchados al motor, o sea la
+            # lista de clientes. Se muestra solo a las cuentas de plataforma; para el resto, y
+            # para el orquestador, queda el UP/DOWN, que es lo que hace falta para operar.
+            show-details: when-authorized
+            roles:
+                - ROLE_PLATFORM_ADMIN
+
 hibernate:
     cache:
         queries: false
@@ -71,6 +81,12 @@ dataSource:
     dialect: org.hibernate.dialect.MySQL8Dialect
     # El DefaultSchemaHandler de GORM emite SET SCHEMA y no funciona en MySQL.
     schemaHandler: bpmplus.multitenancy.MySqlSchemaHandler
+    # nullCatalogMeansCurrent=true en la url de cada entorno: sin eso, Connector/J 8+ resuelve
+    # DatabaseMetaData.getTables(null, ...) contra TODAS las bases del servidor, no contra la
+    # de la conexion. Con una base por cliente eso significa que preguntar "existe esta tabla"
+    # da que si porque la tiene OTRO cliente. Flowable crea su esquema justo asi (ver
+    # AbstractSqlScriptBasedDbSchemaManager.isTablePresent): sin la propiedad, el segundo
+    # tenant se queda sin tablas ACT_* y falla en runtime.
     username: ${MYSQL_USER:root}
     password: ${MYSQL_PASSWORD:}
 
@@ -79,17 +95,17 @@ environments:
         dataSource:
             # El esquema lo gobierna Liquibase, no Hibernate.
             dbCreate: none
-            url: jdbc:mysql://${MYSQL_HOST:localhost}:${MYSQL_PORT:3306}/${MYSQL_DATABASE:bpmplus}?useUnicode=yes&characterEncoding=UTF-8&serverTimezone=UTC
+            url: jdbc:mysql://${MYSQL_HOST:localhost}:${MYSQL_PORT:3306}/${MYSQL_DATABASE:bpmplus}?useUnicode=yes&characterEncoding=UTF-8&serverTimezone=UTC&nullCatalogMeansCurrent=true
     test:
         dataSource:
             # El esquema lo gobierna Liquibase, no Hibernate.
             dbCreate: none
-            url: jdbc:mysql://${MYSQL_HOST:localhost}:${MYSQL_PORT:3306}/${MYSQL_DATABASE:bpmplus_test}?useUnicode=yes&characterEncoding=UTF-8&serverTimezone=UTC
+            url: jdbc:mysql://${MYSQL_HOST:localhost}:${MYSQL_PORT:3306}/${MYSQL_DATABASE:bpmplus_test}?useUnicode=yes&characterEncoding=UTF-8&serverTimezone=UTC&nullCatalogMeansCurrent=true
     production:
         dataSource:
             # El esquema lo gobierna la herramienta de migraciones, no Hibernate.
             dbCreate: none
-            url: jdbc:mysql://${MYSQL_HOST}:${MYSQL_PORT:3306}/${MYSQL_DATABASE}?useUnicode=yes&characterEncoding=UTF-8&serverTimezone=UTC
+            url: jdbc:mysql://${MYSQL_HOST}:${MYSQL_PORT:3306}/${MYSQL_DATABASE}?useUnicode=yes&characterEncoding=UTF-8&serverTimezone=UTC&nullCatalogMeansCurrent=true
             properties:
                 # Propiedades de HikariCP, que es el pool que realmente se usa: en el
                 # classpath no esta tomcat-jdbc, asi que DataSourceBuilder elige Hikari.
@@ -141,6 +157,17 @@ grails:
                       access: ['permitAll']
                     - pattern: /**/favicon.ico
                       access: ['permitAll']
+                    # Actuator. El health tiene que ser publico: lo consulta el orquestador
+                    # (ver el HEALTHCHECK del Dockerfile), que no tiene con que autenticarse.
+                    # Sin detalle no dice mas que UP o DOWN; el detalle, que incluye los
+                    # codigos de tenant, lo gobierna management.endpoint.health.roles.
+                    - pattern: /actuator/health
+                      access: ['permitAll']
+                    - pattern: /actuator/health/**
+                      access: ['permitAll']
+                    # El resto del actuator expone configuracion y entorno: solo plataforma.
+                    - pattern: /actuator/**
+                      access: ['ROLE_PLATFORM_ADMIN']
                     # Login y logout: sin esto no se puede llegar al formulario,
                     # porque rejectIfNoRule esta activo por defecto.
                     - pattern: /login/**

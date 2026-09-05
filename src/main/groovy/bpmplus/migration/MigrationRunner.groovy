@@ -20,18 +20,28 @@ class MigrationRunner {
         String command = args.length > 0 ? args[0] : 'migrate'
         String tag = args.length > 1 ? args[1] : null
 
-        String host = value('MYSQL_HOST', 'localhost')
-        String port = value('MYSQL_PORT', '3306')
-        String database = value('MYSQL_DATABASE', 'bpmplus')
-        String user = value('MYSQL_USER', 'root')
-        String password = value('MYSQL_PASSWORD', '')
-
         // El contexto decide que changesets aplican. Se toma del entorno para que el pipeline
         // de deploy no pueda cargar en produccion los changesets de desarrollo.
         String context = value('LIQUIBASE_CONTEXTS', null) ?: value('GRAILS_ENV', 'development')
 
+        Map<String, String> target
+        try {
+            target = connectionSettings(context)
+        }
+        catch (IllegalStateException e) {
+            System.err.println(e.message)
+            System.exit(2)
+            return
+        }
+
+        String host = target.host
+        String port = target.port
+        String database = target.database
+        String user = target.user
+        String password = target.password
+
         String url = "jdbc:mysql://${host}:${port}/${database}" +
-                '?useUnicode=yes&characterEncoding=UTF-8&serverTimezone=UTC'
+                '?useUnicode=yes&characterEncoding=UTF-8&serverTimezone=UTC&nullCatalogMeansCurrent=true'
 
         println "Comando : ${command}${tag ? ' ' + tag : ''}"
         println "Destino : ${user}@${host}:${port}/${database}"
@@ -68,6 +78,46 @@ class MigrationRunner {
             e.printStackTrace()
             System.exit(1)
         }
+    }
+
+    /**
+     * A que base apunta la migracion.
+     *
+     * En produccion NO hay valores por defecto para el host ni para la base. En cualquier otro
+     * entorno apunta al MySQL local, que es lo comodo para desarrollar.
+     *
+     * La asimetria es a proposito y es la misma que tiene application.yml, donde el bloque de
+     * produccion usa ${MYSQL_HOST} y ${MYSQL_DATABASE} sin fallback. Sin esto las dos mitades no
+     * coincidian: un deploy que se olvidara de exportar las variables no fallaba, se iba a
+     * localhost/bpmplus y migraba la base de desarrollo aplicando los changesets de produccion,
+     * informando que todo salio bien. Un deploy a produccion que no encuentra produccion tiene
+     * que parar, no elegir otra base.
+     */
+    static Map<String, String> connectionSettings(String context) {
+        boolean production = context?.trim() == 'production'
+
+        String host = value('MYSQL_HOST', production ? null : 'localhost')
+        String database = value('MYSQL_DATABASE', production ? null : 'bpmplus')
+
+        List<String> faltantes = []
+        if (!host?.trim()) {
+            faltantes << 'MYSQL_HOST'
+        }
+        if (!database?.trim()) {
+            faltantes << 'MYSQL_DATABASE'
+        }
+        if (faltantes) {
+            throw new IllegalStateException(
+                    "Faltan variables de conexion para el contexto [${context}]: ${faltantes.join(', ')}. " +
+                    'En produccion no se asume ningun destino: hay que indicarlo explicitamente, ' +
+                    'las mismas variables que usa application.yml.')
+        }
+
+        [host    : host,
+         port    : value('MYSQL_PORT', '3306'),
+         database: database,
+         user    : value('MYSQL_USER', 'root'),
+         password: value('MYSQL_PASSWORD', '')]
     }
 
     /** Permite -D para pruebas puntuales, con la variable de entorno como fuente normal. */

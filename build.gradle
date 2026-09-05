@@ -53,6 +53,10 @@ dependencies {
     implementation "org.apache.grails:grails-spring-security:7.0.2"
     implementation "org.apache.grails:grails-spring-security-ui:7.0.2"
     implementation "org.liquibase:liquibase-core:4.32.0"
+    // Motor BPM. Se usa el engine "pelado", NO flowable-spring-boot-starter: ese
+    // autoconfigura el motor sobre UN solo datasource, y aca cada tenant tiene su propia
+    // base MySQL. La configuracion multi-schema se arma a mano en bpmplus.flowable.
+    implementation "org.flowable:flowable-engine:$flowableVersion"
     implementation "org.apache.grails:grails-data-hibernate5"
     implementation "org.apache.grails:grails-gsp"
     integrationTestImplementation testFixtures("org.apache.grails:grails-geb")
@@ -121,4 +125,5 @@ assets {
             'webjars/bootstrap-icons/*/font/fonts/*',
     ]
 }
+
 

@@ -4,6 +4,7 @@ import grails.gorm.transactions.Transactional
 
 import org.grails.orm.hibernate.HibernateDatastore
 
+import bpmplus.flowable.ProcessEngineService
 import bpmplus.migration.SchemaMigrationService
 import bpmplus.multitenancy.TenantRegistryResolver
 
@@ -19,6 +20,7 @@ class TenantProvisioningService {
 
     HibernateDatastore hibernateDatastore
     SchemaMigrationService schemaMigrationService
+    ProcessEngineService processEngineService
 
     /**
      * Da de alta en GORM los tenants que ya existen en el registro. Se invoca desde BootStrap,
@@ -55,5 +57,10 @@ class TenantProvisioningService {
         // id devuelto. Por eso hay que dar de alta un tenant por vez.
         TenantRegistryResolver.register(code)
         hibernateDatastore.addTenantForSchema(code)
+
+        // Va al final y despues del registro en el resolver: el motor resuelve el tenant en
+        // curso con el mismo TenantResolver, asi que el codigo ya tiene que ser conocido.
+        // Aca es donde Flowable engancha el schema del tenant y le despliega sus procesos.
+        processEngineService.attachTenant(code)
     }
 }

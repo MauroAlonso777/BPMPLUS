@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Proceso minimo para el spike de Flowable: arranca, espera en una tarea de usuario y termina.
+
+  La tarea de usuario esta a proposito: deja el proceso vivo en ACT_RU_EXECUTION y
+  ACT_RU_TASK, que es lo que el spec de aislamiento comprueba por JDBC crudo en el schema de
+  cada tenant. Un proceso que terminara solo no dejaria nada en las tablas de runtime.
+-->
+<definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
+             xmlns:flowable="http://flowable.org/bpmn"
+             targetNamespace="http://bpmplus/spike">
+
+    <process id="spikeAislamiento" name="Spike de aislamiento multi-tenant" isExecutable="true">
+        <startEvent id="inicio"/>
+        <sequenceFlow id="aRevisar" sourceRef="inicio" targetRef="revisar"/>
+        <userTask id="revisar" name="Revisar" flowable:assignee="alguien"/>
+        <sequenceFlow id="aFin" sourceRef="revisar" targetRef="fin"/>
+        <endEvent id="fin"/>
+    </process>
+
+</definitions>

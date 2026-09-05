@@ -1,0 +1,17 @@
+# El build de la imagen compila desde el fuente: lo que ya este compilado local no solo no sirve,
+# ademas invalida el cache de capas en cada build.
+build/
+.gradle/
+out/
+.idea/
+*.iml
+.git/
+.github/
+
+# Documentacion y planes de la raiz. Van con "/" adelante a proposito: en .dockerignore el "*"
+# no cruza barras, asi que un "*.md" suelto ya seria solo de raiz, pero explicito se lee sin
+# tener que acordarse de esa regla. Lo que NO hay que excluir es la documentacion que vive
+# dentro de src/ (por ejemplo src/main/resources/processes/README.md, que es la convencion de
+# los diagramas y viaja con ellos).
+/*.md
+/*.docx

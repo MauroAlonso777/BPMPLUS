@@ -42,7 +42,7 @@ class TenantIsolationSpec extends Specification {
     static final String ACME = 'it_acme'
     static final String GLOBEX = 'it_globex'
     static final String URL = 'jdbc:mysql://localhost:3306/bpmplus_test' +
-            '?useUnicode=yes&characterEncoding=UTF-8&serverTimezone=UTC'
+            '?useUnicode=yes&characterEncoding=UTF-8&serverTimezone=UTC&nullCatalogMeansCurrent=true'
 
     @Shared
     @AutoCleanup

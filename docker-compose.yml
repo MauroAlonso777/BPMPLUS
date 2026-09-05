@@ -1,0 +1,75 @@
+# Empaquetado de BPMPLUS con el motor Flowable embebido.
+#
+# Lo que importa de este archivo es el ORDEN: las migraciones son un servicio aparte que corre
+# hasta terminar, con la aplicacion todavia apagada, y recien despues arranca la aplicacion.
+#
+#   docker compose up -d
+#
+# El servicio `migraciones` recorre el schema maestro y el de CADA tenant del registro, e incluye
+# el esquema de Flowable, que desde la Fase 6 tambien lo gobierna Liquibase. La aplicacion arranca
+# con databaseSchemaUpdate=false: si el esquema no es el que espera su version del motor, falla al
+# enganchar el primer tenant, en vez de descubrirlo en produccion.
+#
+# Antes de una tanda de cambios conviene etiquetar, para poder volver:
+#   docker compose run --rm migraciones tag v1.4
+#   docker compose run --rm migraciones rollback v1.4
+
+services:
+
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD:?hay que definir MYSQL_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-bpmplus}
+    command:
+      # Cada tenant es una base distinta y su nombre viene del registro. En Linux los nombres de
+      # base distinguen mayusculas de minusculas, y por eso Tenant.code se restringe a minusculas
+      # (ver la domain class). Se fija el modo para que no dependa de la imagen.
+      - --lower-case-table-names=0
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${MYSQL_PASSWORD}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  # Paso de deploy, no un servicio: corre una vez y termina. `restart: no` es explicito porque
+  # reintentar una migracion a ciegas es peor que fallar y que alguien mire.
+  migraciones:
+    build: .
+    restart: "no"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment: &conexion
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-bpmplus}
+      MYSQL_USER: ${MYSQL_USER:-root}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      GRAILS_ENV: production
+    # Se invoca MigrationRunner desde el mismo jar de la aplicacion, para que el paso de deploy
+    # use exactamente las clases y los changelogs que se van a desplegar.
+    entrypoint:
+      - java
+      - -cp
+      - /app/bpmplus.jar
+      - -Dloader.main=bpmplus.migration.MigrationRunner
+      - org.springframework.boot.loader.launch.PropertiesLauncher
+    command: ["migrate"]
+
+  app:
+    build: .
+    depends_on:
+      mysql:
+        condition: service_healthy
+      migraciones:
+        condition: service_completed_successfully
+    environment: *conexion
+    ports:
+      - "${BPMPLUS_PORT:-8080}:8080"
+
+volumes:
+  mysql-data:

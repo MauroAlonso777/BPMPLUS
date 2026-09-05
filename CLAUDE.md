@@ -130,6 +130,258 @@ Nota: `dbCreate: validate` no sirve como configuración permanente, porque Hiber
 construir el `SessionFactory`, antes de que corran las migraciones. El spec hace los dos pasos en
 el orden correcto.
 
+## Flowable (motor BPM)
+
+Estado: **plan completo (Fases 0 a 6)**. El motor corre embebido, su esquema lo gobierna
+Liquibase igual que el resto, los procesos se despliegan solos en cada tenant y una tarea de
+servicio puede invocar los servicios Groovy de la aplicación.
+
+Se usa `org.flowable:flowable-engine` 7.2.0 **pelado**, no `flowable-spring-boot-starter`: el
+starter autoconfigura el motor sobre un único `DataSource`, y acá cada cliente tiene su propia
+base MySQL. La configuración se arma a mano con `MultiSchemaMultiTenantProcessEngineConfiguration`.
+
+Las piezas:
+
+- `bpmplus.flowable.MultiSchemaProcessEngineFactory` — arma y sostiene el `ProcessEngine`. Sin
+  Spring, igual que `SchemaMigrator`, para que la puedan usar tanto la aplicación como un spec.
+- `bpmplus.flowable.FlowableTenantInfoHolder` — le dice al motor sobre qué tenant opera.
+- `bpmplus.flowable.TenantSchemaDataSource` — vista de un solo schema sobre el pool compartido.
+- `bpmplus.flowable.ApplicationContextBeans` — expone los beans de Spring a las expresiones de un
+  proceso; es lo que permite que una tarea de servicio llame a un servicio Groovy.
+- `bpmplus.flowable.ProcessDefinitionDeployer` — despliega los `.bpmn20.xml` del classpath en
+  cada tenant, de forma idempotente.
+- `bpmplus.flowable.ProcessEngineHealthIndicator` — publica en `/actuator/health` el motor y los
+  tenants que tiene enganchados.
+- `bpmplus.flowable.ProcessEngineService` — el envoltorio de Grails, con el motor y sus servicios.
+
+### Un tenant nuevo se registra en TRES lugares
+
+A los dos de la sección anterior (GORM y el changelog) se suma el motor. Los tres los hace
+`TenantProvisioningService.attachSchema()`, en este orden y no en otro:
+
+1. `schemaMigrationService.migrateTenant(code)` — crea la base y sus tablas.
+2. `TenantRegistryResolver.register(code)` + `hibernateDatastore.addTenantForSchema(code)`.
+3. `processEngineService.attachTenant(code)` — engancha la base al motor, que valida ahí el
+   esquema, y le despliega los procesos del classpath.
+
+El paso 3 va al final porque el motor resuelve el tenant con el mismo resolver que el resto de
+la aplicación: si el código no está registrado todavía, la resolución falla.
+
+### La resolución de tenant es una sola
+
+`FlowableTenantInfoHolder.getCurrentTenantId()` delega en `Tenants.currentId(datastore)`, que
+respeta `Tenants.withId(...)` y, si no, cae en `TenantRegistryResolver`. O sea: el usuario
+autenticado manda igual para GORM que para Flowable, y la cabecera `X-Tenant-Id` se rechaza
+igual en los dos. No hay un segundo mecanismo que mantener sincronizado.
+
+Hay dos escapes, los dos acotados y documentados en la clase:
+
+- `setCurrentTenantId()` / `clearCurrentTenantId()`: el `ThreadLocal` que fija el propio motor
+  para trabajar sobre un tenant fuera de un request (crear su esquema, cerrarse). Es también el
+  camino para tareas de administración como desplegar un `.bpmn20.xml`.
+- `withoutTenantResolution { ... }`: solo durante el arranque del motor. `initAsyncExecutor()`
+  pregunta por el tenant en curso antes de que exista ninguno, y el contrato de Flowable admite
+  `null` ahí; el resolver de la aplicación, en cambio, rechaza esa pregunta a propósito.
+
+### Los diagramas BPMN y cómo llegan a cada tenant
+
+Los `.bpmn20.xml` viven en `src/main/resources/processes/`. Ahí hay un `README.md` con la
+convención de nombres y, sobre todo, con las dos cosas que hay que mirar al guardar desde el
+modelador; conviene leerlo antes de agregar el primero.
+
+La herramienta es **Camunda Modeler** (escritorio, Apache-2.0), porque Flowable 7 OSS eliminó su
+propio modeler. El riesgo de usar el modelador de otro producto es concreto: Camunda escribe sus
+propiedades como `camunda:...` y **Flowable las descarta en silencio**. El proceso se despliega,
+se ejecuta, y el `assignee` o la `expression` de una tarea de servicio simplemente no están.
+`ProcessDefinitionValidationSpec` convierte ese silencio en un test rojo: parsea y valida cada
+diagrama con Flowable y rechaza cualquier prefijo ajeno.
+
+`ProcessDefinitionDeployer` los despliega en la base de cada tenant, al darlo de alta y en cada
+arranque, con `enableDuplicateFiltering()`: si el archivo no cambió, no se crea una versión nueva.
+Sin eso, cada reinicio generaría una versión más de cada proceso en cada cliente.
+
+Es **un despliegue por archivo**, no uno que los agrupe. `enableDuplicateFiltering()` compara
+contra el último despliegue del mismo nombre y, si difiere en algo, lo despliega entero: agrupados,
+tocar un diagrama le subiría la versión a todos los demás. Las instancias en curso no se verían
+afectadas —siguen con la versión con la que arrancaron—, pero el repositorio de cada cliente se
+llenaría de versiones que no cambiaron nada.
+
+### Cómo una tarea de servicio llama a un servicio Groovy
+
+```xml
+<serviceTask id="registrar" flowable:expression="${expedienteService.registrar(execution)}"/>
+```
+
+`ApplicationContextBeans` resuelve la raíz de la expresión contra el contexto de Spring, así que
+cualquier bean de `grails-app/services` está disponible por su nombre. Es lo que en una app Spring
+Boot normal aporta `flowable-spring`, módulo que acá no se usa porque su autoconfiguración asume
+un único datasource.
+
+El servicio **no** tiene que declarar ningún tenant: GORM lo resuelve por su cuenta con el mismo
+resolver que el motor, así que lo que escriba cae en la base del cliente cuyo proceso está
+corriendo. Es el pago concreto de la Fase 1, y `ProcessLifecycleSpec` lo comprueba escribiendo
+desde una tarea de servicio y leyendo la fila por JDBC crudo en el schema esperado.
+
+Lo que sí hay que tener presente es lo de la Fase 2: **el motor no comparte transacción** con el
+servicio que invoca. Si el proceso avanza y el servicio falla, o al revés, no hay un rollback que
+los abarque a los dos; hay que decidirlo explícitamente en cada proceso.
+
+### El motor no puede recibir el bean `dataSource` tal cual
+
+`MultiSchemaProcessEngineFactory` desenvuelve el `DataSource` que le pasan hasta llegar al pool
+(`unwrapTransactionAware`). No es una optimización: el bean `dataSource` de Grails es un
+`TransactionAwareDataSourceProxy`, y si hay una transacción de Spring abierta en el hilo,
+`getConnection()` devuelve **la conexión de esa transacción** en vez de una del pool.
+
+Con esta configuración multi-schema el motor maneja sus propias transacciones JDBC
+(`createTransactionInterceptor()` devuelve `null`). Sobre una conexión prestada eso significa
+que confirma cambios que la aplicación no decidió confirmar y, al cerrar, MyBatis le restaura
+`autocommit=true`. Se ve al dar de alta un tenant, porque `TenantProvisioningService` es
+`@Transactional`: `Could not commit Hibernate transaction ... Can't call commit when
+autocommit=true`.
+
+La contrapartida hay que tenerla presente en la **Fase 4**: lo que hace Flowable se confirma por
+su cuenta y nunca comparte transacción con el servicio Groovy que lo llamó.
+
+### `setCatalog()`, no `USE`, para apuntar la conexión del motor
+
+`TenantSchemaDataSource` apunta la conexión con `setCatalog(schema)`. `MySqlSchemaHandler`, que
+es el camino de GORM, usa `USE <schema>`: los dos cambian de base para las consultas, pero un
+`USE` suelto deja al driver creyendo que sigue en la base de la url — `Connection.getCatalog()`
+no lo sigue.
+
+Eso importa porque de ahí cuelga la lectura de metadatos, que es como Flowable decide si tiene
+que crear su esquema. Con `USE`, las tablas del tenant se crean bien la primera vez y en el
+arranque siguiente el motor no las ve, vuelve a emitir el DDL y falla con
+`Table 'act_ge_property' already exists`. Como beneficio adicional, HikariCP sabe restaurar el
+catalog al devolver la conexión al pool, cosa que con un `USE` crudo no puede hacer.
+
+### `nullCatalogMeansCurrent=true` no es decorativo
+
+Está en la url JDBC de los tres entornos y en la de los specs. Sin esa propiedad, Connector/J 8+
+resuelve `DatabaseMetaData.getTables(null, ...)` contra **todas** las bases del servidor, no
+contra la de la conexión. Con una base por cliente, preguntar "¿existe esta tabla?" da que sí
+porque la tiene **otro** cliente.
+
+Flowable crea su esquema justo así (`AbstractSqlScriptBasedDbSchemaManager.isTablePresent`):
+sin la propiedad, el primer tenant obtiene sus tablas, el segundo se da por hecho y queda vacío,
+y el fallo aparece más tarde como `Table 'x.act_ge_property' doesn't exist`. Es la misma clase
+de error silencioso que una entidad sin `MultiTenant`.
+
+### Qué queda apagado, y por qué
+
+- **Motor de IDM** (`disableIdmEngine = true`). La identidad la maneja Spring Security contra el
+  schema maestro. El IDM de Flowable replicaría usuarios y grupos en tablas `ACT_ID_*` dentro de
+  la base de cada cliente: dos padrones que se irían separando.
+- **Registro de eventos** (`disableEventRegistry = true`). Apenas termina de construirse consulta
+  sus definiciones de canal, y en ese momento no hay tenant en curso ni una base única sobre la
+  que preguntar: da `NullPointerException` dentro del `TenantAwareDataSource`. Si más adelante se
+  quieren eventos, hay que arrancarlo por tenant, no junto con el motor.
+- **Ejecutor asincrónico** (`asyncExecutorActivate = false`). Levanta un pool de hilos *por
+  tenant*. Los timers y las tareas `async` no forman parte del alcance actual; encenderlo es una
+  decisión aparte, con su propio dimensionamiento.
+
+### El esquema de Flowable lo gobierna Liquibase
+
+Los changesets `flowable-001-common`, `-002-engine` y `-003-history` viven en el changelog de
+tenant y ejecutan **los scripts del propio jar de Flowable** (`<sqlFile>` sobre rutas del
+classpath). No hay copia en el repositorio que pueda desincronizarse de la dependencia.
+
+El motor arranca con `databaseSchemaUpdate = false`: no crea nada, **comprueba** que la versión
+del esquema sea la que espera su versión de la biblioteca. Una desviación deja de ser un
+problema de producción y pasa a ser un error de arranque:
+
+```
+FlowableWrongDbException: version mismatch: library version is '7.2.0.2', db version is 6.8.0.0
+```
+
+**Al subir la versión de Flowable** hay que agregar un changeset nuevo con el script de upgrade
+que corresponda (`org/flowable/common/db/upgrade/...`, `org/flowable/db/upgrade/...`). Los
+changesets existentes ya corrieron y Liquibase no los repite; si nadie agrega el upgrade, el
+arranque falla con el mensaje de arriba, que es justamente el aviso que se busca.
+
+### Liquibase no puede leer el changelog desde el jar empaquetado
+
+Por eso existe `bpmplus.migration.ClasspathResourceAccessor`. El `ClassLoaderResourceAccessor`
+de Liquibase abre los recursos con `uri.toURL().openStream()`, y dentro de un jar ejecutable de
+Spring Boot la URI es `jar:nested:/app/bpmplus.jar/!BOOT-INF/classes/!/db/changelog/...`, que el
+manejador de Spring Boot rechaza con `no !/ in spec`.
+
+Sin eso las migraciones andan en desarrollo y fallan empaquetadas, que es la única forma en que
+se despliegan — y rompe las dos vías, la de `BootStrap` y la de `MigrationRunner`. El accessor
+propio lee con `getResourceAsStream()`, que no arma ninguna URL.
+
+### El SQL crudo necesita que la conexión esté en el schema del tenant
+
+`SchemaMigrator.onSchema()` hace `connection.catalog = schema` además de fijarle a Liquibase el
+`defaultSchemaName`. Liquibase califica con ese nombre lo que entiende (`createTable`,
+`addColumn`…), pero el SQL crudo de un `<sql>` o un `<sqlFile>` lo manda tal cual: sin mover la
+conexión, esas sentencias caen en la base de la **url**, o sea en el schema maestro, y el primer
+tenant que se migre se lleva las tablas de todos.
+
+Apareció al meter los scripts de Flowable, que son los primeros `<sqlFile>` del proyecto. Lo
+cubre el caso `el esquema de Flowable no se crea en la base maestra` de
+`FlowableTenantIsolationSpec`.
+
+### Empaquetado y despliegue
+
+**Nada está desplegado todavía.** El runbook de producción, con lo que falta decidir y la
+secuencia exacta, está en `PLAN_FLOWABLE_BPMPLUS.md`, sección *Puesta en producción*.
+
+`Dockerfile` (build multi-etapa sobre Corretto 17, usuario sin privilegios, `bootJar`) y
+`docker-compose.yml` con tres servicios: `mysql`, `migraciones` y `app`.
+
+`migraciones` no es un servicio sino un paso: corre `MigrationRunner` **desde el mismo jar** de la
+aplicación y termina; `app` depende de que haya terminado bien
+(`condition: service_completed_successfully`). Ese orden es el punto del archivo: el esquema se
+migra con la aplicación apagada. `BootStrap` también migra, pero eso es para desarrollo — en
+producción es tarde, porque para entonces la aplicación ya empezó a atender.
+
+`/actuator/health` es público a propósito (lo consulta el `HEALTHCHECK`), pero el **detalle** está
+restringido a `ROLE_PLATFORM_ADMIN` vía `management.endpoint.health.roles`: incluye los códigos de
+tenant enganchados, o sea la lista de clientes.
+
+**Sin verificar:** la imagen no se construyó ni se levantó, porque en esta máquina no hay Docker.
+Sí se verificó lo que se pudo por separado: `bootJar` produce el jar ejecutable, y `MigrationRunner`
+corre desde ese jar y migra maestro y tenants. `.github/workflows/ci.yml` repite las dos cosas en
+cada push, además de la suite.
+
+### Un deploy a producción sin destino tiene que parar, no elegir otra base
+
+`MigrationRunner.connectionSettings()` exige `MYSQL_HOST` y `MYSQL_DATABASE` cuando el contexto es
+`production`; en cualquier otro entorno apunta al MySQL local. Es la misma asimetría que ya tenía
+`application.yml`, donde el bloque de producción usa `${MYSQL_HOST}` y `${MYSQL_DATABASE}` sin
+fallback.
+
+Antes no coincidían: el runner rellenaba con `localhost`/`bpmplus`, así que un deploy que se
+olvidara de exportar las variables migraba **la base de desarrollo** aplicando los changesets de
+producción, e informaba que todo salió bien. Lo cubre `MigrationRunnerTargetSpec`.
+
+### Dónde se comprueba
+
+`FlowableTenantIsolationSpec` corre contra el MySQL local y `bpmplus_test`. Verifica que las
+tablas se creen en la base de cada tenant y **no** en la maestra, que un segundo arranque sobre
+schemas ya creados no repita el DDL, que un proceso arrancado en un tenant no se vea ni se pueda
+completar desde el otro (comprobado además por JDBC crudo, sin pasar por el motor), que la
+cabecera y la falta de autenticación se rechacen igual que en GORM, y que la fábrica se quede
+con el pool y no con el envoltorio transaccional.
+
+`ProcessLifecycleSpec` cubre el ciclo de vida completo bajo dos tenants: despliegue idempotente,
+tarea de servicio que invoca un bean y escribe con GORM en el schema correcto, tarea humana,
+gateway, historial y aislamiento del historial entre tenants.
+
+`ProcessDefinitionValidationSpec` valida todo `.bpmn20.xml` commiteado (ver
+`src/main/resources/processes/README.md`).
+
+Además se comprobó a mano, sobre la aplicación corriendo:
+
+- Migrar **desde el jar empaquetado** deja las 32 tablas dentro de la base del tenant y ninguna en
+  la maestra.
+- La aplicación arranca sin errores y `/actuator/health` responde.
+- Con un diagrama en `src/main/resources/processes/`, el arranque lo despliega en la base del
+  tenant (versión 1, un despliegue por archivo), y un segundo arranque **no** crea otra versión.
+- Con la versión del esquema alterada a mano, la aplicación **se niega a arrancar**.
+
 ## Criterio para portar stored procedures a servicios Groovy
 
 - Priorizar portar a **servicios Groovy** los SPs que contienen reglas de negocio, validaciones o cálculos (candidatos naturales a lógica de aplicación).

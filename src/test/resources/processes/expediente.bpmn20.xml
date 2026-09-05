@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Proceso de las Fases 4 y 5: cubre el ciclo de vida completo y, sobre todo, la tarea de
+  servicio, que es donde el motor toca la logica de negocio.
+
+  La tarea "registrar" invoca un bean de la aplicacion por expresion. El bean lo resuelve
+  ApplicationContextBeans contra el contexto de Spring; el spec le pasa uno armado a mano.
+
+  Ojo con el namespace: las extensiones van con el prefijo flowable:. Si Camunda Modeler las
+  guarda como camunda:, Flowable las descarta en silencio y la tarea de servicio no hace nada.
+-->
+<definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
+             xmlns:flowable="http://flowable.org/bpmn"
+             targetNamespace="http://bpmplus/procesos">
+
+    <process id="expediente" name="Alta de expediente" isExecutable="true">
+
+        <startEvent id="inicio"/>
+        <sequenceFlow id="aRegistrar" sourceRef="inicio" targetRef="registrar"/>
+
+        <!-- Escribe una entidad GORM. Sirve para comprobar que la escritura cae en el schema
+             del tenant correcto, o sea que el motor y GORM resuelven el mismo tenant. -->
+        <serviceTask id="registrar" name="Registrar el expediente"
+                     flowable:expression="${expedienteService.registrar(execution)}"/>
+        <sequenceFlow id="aRevisar" sourceRef="registrar" targetRef="revisar"/>
+
+        <userTask id="revisar" name="Revisar" flowable:assignee="${responsable}"/>
+        <sequenceFlow id="aDecidir" sourceRef="revisar" targetRef="decidir"/>
+
+        <exclusiveGateway id="decidir" default="aRechazado"/>
+        <sequenceFlow id="aAprobado" sourceRef="decidir" targetRef="aprobado">
+            <conditionExpression xsi:type="tFormalExpression"
+                                 xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">${aprobado}</conditionExpression>
+        </sequenceFlow>
+        <sequenceFlow id="aRechazado" sourceRef="decidir" targetRef="rechazado"/>
+
+        <endEvent id="aprobado"/>
+        <endEvent id="rechazado"/>
+
+    </process>
+
+</definitions>

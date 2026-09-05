@@ -133,7 +133,13 @@ class MySqlSchemaHandler implements SchemaHandler {
         }
     }
 
-    private static String quoteIdentifier(String name) {
+    /**
+     * Valida el identificador y lo entrecomilla. Es publico porque tambien lo usa
+     * bpmplus.flowable.TenantSchemaDataSource, que emite su propio USE sin pasar por
+     * useSchema(): ese metodo, de paso, recuerda el schema por defecto a partir de la
+     * conexion, y una conexion del pool que ya venia apuntando a un tenant lo dejaria mal.
+     */
+    static String quoteIdentifier(String name) {
         if (!name || !VALID_SCHEMA_NAME.matcher(name).matches()) {
             throw new IllegalArgumentException(
                     "Nombre de schema invalido: [${name}]. Debe empezar con letra y contener " +

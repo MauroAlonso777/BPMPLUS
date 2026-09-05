@@ -1,0 +1,74 @@
+# La suite necesita un MySQL de verdad: los specs de multi-tenancy y de Flowable comprueban en
+# que base termina cada cosa, y eso no se puede simular con una base en memoria.
+#
+# Es tambien lo que hace cierta la nota del Dockerfile: la imagen se construye sin tests, porque
+# los tests corren aca antes.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: bpmplus
+          MYSQL_DATABASE: bpmplus_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost -pbpmplus"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+
+    env:
+      # Los specs se conectan a localhost:3306 como root y toman la clave de aca.
+      MYSQL_PASSWORD: bpmplus
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: corretto
+          java-version: '17'
+          cache: gradle
+
+      - name: Tests
+        run: ./gradlew --no-daemon clean test
+
+      # Comprueba que el jar ejecutable se arma. No corre la aplicacion: eso necesita el schema
+      # maestro migrado, y el orden de deploy es migrar primero, con la aplicacion apagada.
+      - name: Empaquetado
+        run: ./gradlew --no-daemon -x test bootJar
+
+      # Las migraciones tienen que poder leerse DESDE el jar. Liquibase no puede abrir los
+      # changelogs por URL dentro de un jar de Spring Boot (ver ClasspathResourceAccessor), y ese
+      # fallo solo aparece empaquetado: en desarrollo, leyendo de build/resources, no se nota.
+      - name: Migraciones desde el jar empaquetado
+        env:
+          MYSQL_HOST: 127.0.0.1
+          MYSQL_PORT: '3306'
+          MYSQL_DATABASE: bpmplus_ci
+          MYSQL_USER: root
+          GRAILS_ENV: production
+        run: |
+          mysql -h 127.0.0.1 -uroot -pbpmplus -e "CREATE DATABASE IF NOT EXISTS bpmplus_ci"
+          java -cp build/libs/*.jar \
+            -Dloader.main=bpmplus.migration.MigrationRunner \
+            org.springframework.boot.loader.launch.PropertiesLauncher migrate
+
+      - name: Informe de tests
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reportes-de-test
+          path: build/reports/tests/test

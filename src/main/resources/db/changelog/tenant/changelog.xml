@@ -10,8 +10,8 @@
   el hbm2ddl del datastore hijo termina apuntando al schema por defecto. El aislamiento en
   runtime no se ve afectado, porque lo da el USE <schema> por conexion.
 
-  Todavia no hay ninguna entidad MultiTenant, asi que no hay changesets. La primera entidad
-  de negocio agrega el suyo aca, no en el changelog maestro.
+  Todavia no hay ninguna entidad MultiTenant de negocio. Lo que si esta aca es el esquema del
+  motor de procesos (tablas ACT_*), que tambien vive dentro de la base de cada cliente.
 
   Reglas para changesets nuevos:
 
@@ -28,5 +28,57 @@
         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
         xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
             http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.32.xsd">
+
+    <!--
+      Esquema de Flowable.
+
+      El motor sabe crear sus propias tablas (databaseSchemaUpdate), pero entonces habria dos
+      mecanismos de migracion por tenant: `./gradlew dbTag` y `dbRollback` no lo alcanzarian, y
+      una actualizacion de version de Flowable cambiaria el esquema sin dejar rastro en
+      DATABASECHANGELOG. Aca lo gobierna Liquibase, como todo lo demas, y el motor arranca con
+      databaseSchemaUpdate=false: comprueba la version del esquema y falla si no coincide.
+
+      Los scripts NO se copian al proyecto: se ejecutan desde el jar de Flowable, que esta en el
+      classpath, y SchemaMigrator usa un ClassLoaderResourceAccessor. Asi no hay una copia que
+      pueda quedar desincronizada de la version de la dependencia.
+
+      AL ACTUALIZAR LA VERSION DE FLOWABLE: estos changesets ya corrieron y Liquibase no los
+      vuelve a ejecutar. Hay que agregar un changeset nuevo con el script de upgrade que
+      corresponda (org/flowable/common/db/upgrade/... y org/flowable/db/upgrade/...). Si no, el
+      arranque falla al comprobar la version, que es el aviso que se busca.
+
+      El orden importa: common trae ACT_GE_PROPERTY y las tablas de los servicios comunes, sobre
+      las que se apoyan las del motor. El rollback lo hace Liquibase en orden inverso, que es
+      justo el que necesitan los drops.
+    -->
+    <changeSet id="flowable-001-common" author="bpmplus">
+        <comment>Tablas comunes de Flowable 7.2.0 (ACT_GE_*, ACT_RU_JOB, ACT_RU_VARIABLE...)</comment>
+        <sqlFile path="org/flowable/common/db/create/flowable.mysql.create.common.sql"
+                 encoding="UTF-8" splitStatements="true" endDelimiter=";" stripComments="true"/>
+        <rollback>
+            <sqlFile path="org/flowable/common/db/drop/flowable.mysql.drop.common.sql"
+                     encoding="UTF-8" splitStatements="true" endDelimiter=";" stripComments="true"/>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="flowable-002-engine" author="bpmplus">
+        <comment>Tablas del motor de procesos (ACT_RE_*, ACT_RU_EXECUTION, ACT_RU_TASK...)</comment>
+        <sqlFile path="org/flowable/db/create/flowable.mysql.create.engine.sql"
+                 encoding="UTF-8" splitStatements="true" endDelimiter=";" stripComments="true"/>
+        <rollback>
+            <sqlFile path="org/flowable/db/drop/flowable.mysql.drop.engine.sql"
+                     encoding="UTF-8" splitStatements="true" endDelimiter=";" stripComments="true"/>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="flowable-003-history" author="bpmplus">
+        <comment>Tablas de historial (ACT_HI_*)</comment>
+        <sqlFile path="org/flowable/db/create/flowable.mysql.create.history.sql"
+                 encoding="UTF-8" splitStatements="true" endDelimiter=";" stripComments="true"/>
+        <rollback>
+            <sqlFile path="org/flowable/db/drop/flowable.mysql.drop.history.sql"
+                     encoding="UTF-8" splitStatements="true" endDelimiter=";" stripComments="true"/>
+        </rollback>
+    </changeSet>
 
 </databaseChangeLog>

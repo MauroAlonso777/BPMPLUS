@@ -15,7 +15,6 @@ import liquibase.Liquibase
 import liquibase.database.Database
 import liquibase.database.DatabaseFactory
 import liquibase.database.jvm.JdbcConnection
-import liquibase.resource.ClassLoaderResourceAccessor
 
 import bpmplus.multitenancy.MySqlSchemaHandler
 
@@ -189,13 +188,25 @@ class SchemaMigrator {
         Connection connection = dataSource.connection
         Database database = null
         try {
+            if (schema) {
+                // Hay que mover la conexion, no solo avisarle a Liquibase. Liquibase califica
+                // con defaultSchemaName lo que entiende (createTable, addColumn...), pero el SQL
+                // crudo de un <sql> o un <sqlFile> lo manda tal cual: sin esto, esas sentencias
+                // caen en la base de la url, o sea en el schema MAESTRO, y el primer tenant que
+                // se migre se lleva las tablas de todos.
+                //
+                // Se usa setCatalog y no "USE": ademas de cambiar de base, mantiene al dia lo
+                // que el driver cree que es la base actual, de lo que depende la lectura de
+                // metadatos con la que Liquibase decide si una tabla ya existe.
+                connection.catalog = schema
+            }
             database = DatabaseFactory.instance.findCorrectDatabaseImplementation(new JdbcConnection(connection))
             if (schema) {
                 // Las tablas y el propio DATABASECHANGELOG van dentro del schema del tenant.
                 database.defaultSchemaName = schema
                 database.liquibaseSchemaName = schema
             }
-            action.call(new Liquibase(changeLogPath, new ClassLoaderResourceAccessor(), database))
+            action.call(new Liquibase(changeLogPath, new ClasspathResourceAccessor(), database))
         }
         finally {
             // database.close() cierra tambien la conexion subyacente.
