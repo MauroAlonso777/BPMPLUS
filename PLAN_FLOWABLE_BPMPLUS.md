@@ -433,9 +433,23 @@ G localhost:8080/proceso/instancias
 | `acme` la completa | ✅ 200, el proceso termina |
 | Sin autenticar | ✅ 302 al login |
 
-Ese ensayo encontró una cosa más: el intento de un cliente sobre la tarea de otro devolvía **500**.
-El aislamiento se cumplía —el motor no encuentra la tarea, está en otra base—, pero el código era
-el equivocado. Ahora es 404.
+Después se recorrieron los bordes de la API contra ese mismo despliegue. Casi todos ya estaban
+bien —404 para un proceso inexistente, 400 sin clave, 405 con el verbo equivocado, 403 con una
+cabecera de tenant ajena, 201 con cuerpo vacío—, y aparecieron dos fallos:
+
+1. **El intento de un cliente sobre la tarea de otro devolvía 500.** El aislamiento se cumplía
+   —el motor no encuentra la tarea, está en otra base—, pero el código era el equivocado. Ahora 404.
+
+2. **Un cliente de API sin credenciales recibía 302 al formulario de login.** Le llegaba un HTML
+   donde esperaba JSON y, como 302 no es un error, un cliente descuidado lo tomaba por una
+   respuesta válida. Ahora `ApiAwareAuthenticationEntryPoint` mira la cabecera `Accept`: quien
+   pide JSON recibe **401**, el navegador sigue yendo al formulario.
+
+   El arreglo rompió el camino del navegador en el primer intento —500 con
+   `NullPointerException`—, porque `AjaxAwareAuthenticationEntryPoint` redeclara
+   `redirectStrategy` y no hereda el valor por defecto de Spring Security. Construir el delegado
+   a mano sin dárselo lo deja en null. Ahora se toma del contexto, y los dos caminos están
+   comprobados.
 
 El diagrama usado era un fixture de pruebas, montado sólo para el ensayo y quitado después:
 `src/main/resources/processes/` queda con su `README.md` y ningún proceso. Los procesos de negocio

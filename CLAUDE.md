@@ -344,14 +344,31 @@ operaciones, devolviendo mapas planos para que los tipos de Flowable no lleguen 
 autenticado; una cuenta de plataforma elige con `X-Tenant-Id`, que el resolver acepta sólo para
 esas cuentas. Aceptarlo por parámetro abriría exactamente el agujero que todo el diseño evita.
 
-Códigos de respuesta que importan:
+Códigos de respuesta, todos comprobados contra el despliegue local:
 
-- **404** cuando lo pedido no existe *en la base de ese cliente*. Incluye el caso de usar el id de
-  una tarea de otro cliente: como el aislamiento es físico, el motor no la encuentra, y para quien
-  llama es indistinguible de que no exista. Antes salía 500, que además sugería un problema del
-  servidor.
-- **403** cuando no se pudo resolver el tenant: o faltan credenciales útiles, o se pidió un tenant
-  que no corresponde.
+| Situación | Código |
+| --- | --- |
+| Sin autenticar, cliente que pide JSON | **401** |
+| Sin autenticar, navegador | 302 al formulario |
+| No se pudo resolver el tenant (falta cabecera, o pide uno ajeno) | **403** |
+| No existe en la base de ese cliente | **404** |
+| Falta la clave del proceso o el id de la tarea | 400 |
+| Verbo incorrecto | 405 |
+
+Dos merecen explicación:
+
+- **404 y no 500** cuando alguien usa el id de una tarea de otro cliente. El aislamiento es
+  físico, así que el motor sencillamente no la encuentra; para quien llama es indistinguible de
+  que no exista. Un 500 además sugeriría que el problema es del servidor.
+- **401 y no 302** para un cliente de API sin credenciales. Lo resuelve
+  `ApiAwareAuthenticationEntryPoint`, que mira la cabecera `Accept`: quien pide JSON recibe 401,
+  el navegador sigue yendo al formulario. Un 302 le devolvía a un cliente de API un HTML donde
+  esperaba JSON y, como 302 no es un error, un cliente descuidado lo tomaba por bueno.
+
+  Cuidado al tocarlo: `AjaxAwareAuthenticationEntryPoint` **redeclara** `redirectStrategy`, así
+  que no hereda el valor por defecto de Spring Security. Construirlo a mano sin dárselo lo deja
+  en `null` y el redirect al formulario revienta con `NullPointerException` — pasó, y por eso el
+  delegado toma esa estrategia del contexto en vez de inventarla.
 
 ### Una conexión no puede volver al pool apuntando a un tenant
 
