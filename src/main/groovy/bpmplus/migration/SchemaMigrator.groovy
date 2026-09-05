@@ -148,6 +148,14 @@ class SchemaMigrator {
         List<String> codes = []
         Connection connection = dataSource.connection
         try {
+            if (!registryExists(connection)) {
+                // Primer despliegue: el schema maestro todavia no se migro, asi que no hay
+                // registro que consultar. No es un error; simplemente no hay tenants. Sin esto,
+                // etiquetar antes de la primera migracion —que es el orden del runbook— fallaba
+                // con "Table 'tenant' doesn't exist".
+                log.info('El registro de tenants todavia no existe: no hay tenants que recorrer')
+                return codes
+            }
             Statement statement = connection.createStatement()
             try {
                 ResultSet rs = statement.executeQuery('SELECT code FROM tenant ORDER BY code')
@@ -163,6 +171,24 @@ class SchemaMigrator {
             connection.close()
         }
         codes
+    }
+
+    /**
+     * Si la tabla del registro existe en la base a la que apunta la conexion.
+     *
+     * Se pregunta por metadatos y no con un SELECT dentro de un try/catch: tragarse una
+     * excepcion de SQL escondería tambien un error de permisos o de conexion, y el resultado
+     * seria recorrer cero tenants creyendo que no hay ninguno.
+     */
+    private static boolean registryExists(Connection connection) {
+        // El catalog es el de la conexion gracias a nullCatalogMeansCurrent=true en la url.
+        ResultSet tables = connection.metaData.getTables(null, null, 'tenant', ['TABLE'] as String[])
+        try {
+            tables.next()
+        }
+        finally {
+            tables.close()
+        }
     }
 
     // --- interno ---

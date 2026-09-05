@@ -59,7 +59,7 @@ class MySqlSchemaHandler implements SchemaHandler {
     @Override
     void useSchema(Connection connection, String name) {
         rememberDefaultSchema(connection)
-        execute(connection, "USE ${quoteIdentifier(name)}")
+        pointAt(connection, name)
     }
 
     @Override
@@ -71,7 +71,43 @@ class MySqlSchemaHandler implements SchemaHandler {
             log.debug('No hay schema por defecto registrado; la conexion queda en su schema actual')
             return
         }
-        execute(connection, "USE ${quoteIdentifier(schema)}")
+        pointAt(connection, schema)
+    }
+
+    /**
+     * Apunta la conexion a un schema.
+     *
+     * Con setCatalog y no con "USE", que es lo que se hacia antes. La diferencia no es de
+     * sintaxis sino de quien se entera:
+     *
+     * - El POOL. HikariCP restaura el catalog al devolver la conexion, pero solo si el cambio
+     *   paso por setCatalog; un "USE" crudo no marca nada y la conexion vuelve al pool apuntando
+     *   al schema del ultimo tenant que la uso. La siguiente consulta a una tabla NO multi-tenant
+     *   —la identidad, sin ir mas lejos— aterriza ahi. Se veia como
+     *   "Table 'acme.user' doesn't exist" al iniciar sesion, y de forma intermitente, porque
+     *   depende de que conexion del pool toque.
+     *   Requiere que el pool tenga configurado su catalog; ver dataSource.properties.catalog.
+     * - El DRIVER. Connection.getCatalog() no sigue un "USE", asi que la lectura de metadatos
+     *   (con nullCatalogMeansCurrent=true) se resuelve contra la base equivocada.
+     */
+    private static void pointAt(Connection connection, String name) {
+        // Primero el USE. No es redundante: obliga a que el cambio ocurra AHORA y falle si el
+        // schema no existe. El DataSource que entrega GORM es un LazyConnectionDataSourceProxy,
+        // donde setCatalog solo se anota y se aplica cuando alguien ejecuta algo; apuntar con
+        // setCatalog a un schema inexistente no lanza nada.
+        //
+        // Y eso importa mucho mas de lo que parece: GORM decide si tiene que CREAR el schema de
+        // un tenant probando a usarlo, y creandolo si useSchema lanza
+        // (HibernateDatastore.addTenantForSchemaInternal). Sin excepcion no crea nada, y el
+        // fallo aparece mucho despues, al construir el SessionFactory del tenant, como
+        // "Unknown database".
+        execute(connection, "USE ${quoteIdentifier(name)}")
+
+        // Y despues setCatalog, que es lo que ven el driver y el pool. Cuesta un viaje mas, pero
+        // sin esto la conexion vuelve al pool apuntando al tenant (el pool no se entera de un USE)
+        // y la lectura de metadatos se resuelve contra la base equivocada (getCatalog() tampoco
+        // sigue un USE).
+        connection.catalog = name
     }
 
     @Override

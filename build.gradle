@@ -68,6 +68,9 @@ dependencies {
     testAndDevelopmentOnly "org.webjars.npm:bootstrap"
     testAndDevelopmentOnly "org.webjars.npm:bootstrap-icons"
     testAndDevelopmentOnly "org.webjars.npm:jquery"
+    // Hikari es runtimeOnly para la aplicacion, pero PoolCatalogRestoreSpec necesita construir
+    // un pool a mano: lo que prueba es como se comporta la conexion al volver al pool.
+    testImplementation "com.zaxxer:HikariCP"
     testImplementation "org.apache.grails:grails-testing-support-datamapping"
     testImplementation "org.spockframework:spock-core"
     testImplementation "org.apache.grails:grails-testing-support-web"

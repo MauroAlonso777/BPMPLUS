@@ -323,6 +323,71 @@ Apareció al meter los scripts de Flowable, que son los primeros `<sqlFile>` del
 cubre el caso `el esquema de Flowable no se crea en la base maestra` de
 `FlowableTenantIsolationSpec`.
 
+### Una conexión no puede volver al pool apuntando a un tenant
+
+Es el fallo más caro que apareció en todo esto, y se veía como un error de login:
+
+```
+Table 'acme.user' doesn't exist
+```
+
+La identidad **no** es multi-tenant: vive en el schema maestro. Pero la consulta caía en la base
+de un cliente, y de forma intermitente, según qué conexión del pool tocara.
+
+La causa: las conexiones se apuntan al schema del tenant en cada checkout y volvían al pool
+apuntando ahí. La siguiente consulta a una tabla no multi-tenant heredaba el schema del último
+cliente que usó esa conexión. Cierra con dos mitades, y hacen falta las dos:
+
+1. `dataSource.properties.catalog` (en los tres entornos) es el schema maestro. HikariCP restaura
+   ahí la conexión al devolverla — pero sólo si tiene un catalog configurado.
+2. `MySqlSchemaHandler` cambia de schema con `setCatalog`, porque Hikari sólo se entera si el
+   cambio pasó por ahí. Un `USE` crudo no marca nada.
+
+Lo fija `PoolCatalogRestoreSpec`, que además deja pinchado el comportamiento viejo: tras un `USE`
+crudo, `getCatalog()` dice «maestro» mientras `SELECT DATABASE()` dice «tenant».
+
+### Por qué el handler hace `USE` **y** `setCatalog`
+
+Parece redundante y no lo es. El `DataSource` que entrega GORM es un
+`LazyConnectionDataSourceProxy`: ahí `setCatalog` sólo se **anota** y se aplica cuando alguien
+ejecuta algo. Apuntar con `setCatalog` a un schema inexistente no lanza nada.
+
+Y de esa excepción depende algo importante: GORM decide si tiene que **crear** el schema de un
+tenant probando a usarlo, y creándolo si `useSchema` lanza
+(`HibernateDatastore.addTenantForSchemaInternal`). Sin excepción no crea nada, y el fallo aparece
+mucho después, al construir el `SessionFactory` del tenant, como `Unknown database`.
+
+Así que el `USE` va primero —obliga a que el cambio ocurra ahora y falla si el schema no existe— y
+el `setCatalog` después, que es lo que ven el driver y el pool. Cuesta un viaje más por checkout;
+es el precio de que las dos cosas sean ciertas a la vez.
+
+### La primera cuenta de plataforma
+
+`SecurityBootstrapService` crea los roles en **todos** los entornos. Antes sólo en desarrollo, y
+eso dejaba una base de producción sin ningún rol: una cuenta creada por migración no habría tenido
+a qué asignarse.
+
+La cuenta se siembra con clave por defecto sólo en desarrollo y test. Fuera de ahí se crea **sólo
+si la base de identidad está vacía y se pasó `ADMIN_PASSWORD`**. Nunca con clave por defecto, y
+nunca si ya hay usuarios — eso sería una puerta trasera: exportar una variable de entorno y
+tener un administrador nuevo en una base en uso.
+
+Ese arranque en frío es necesario, no una comodidad. La consola donde se crean las cuentas exige
+una cuenta con `ROLE_ADMIN`, así que sin una primera cuenta no hay forma de crear ninguna; la
+única salida documentada antes era «crearlas desde la consola», que es circular. Las ramas están
+fijadas en `SecurityBootstrapDecisionSpec`.
+
+### El registro de tenants puede no existir todavía
+
+`SchemaMigrator.registeredTenantCodes()` devuelve vacío si la tabla `tenant` no existe, en vez de
+fallar. Es el primer despliegue: el runbook dice etiquetar y después migrar, y etiquetar recorre
+los tenants del registro — que todavía no está creado. Sin esto, `./gradlew dbTag` fallaba con
+`Table 'tenant' doesn't exist` justo en el único despliegue en que no hay nada a que volver.
+
+La comprobación es por metadatos y no un `SELECT` dentro de un `try/catch`: tragarse una excepción
+de SQL escondería también un error de permisos, y el resultado sería recorrer cero tenants creyendo
+que no hay ninguno. Lo cubre `SchemaMigratorRegistrySpec`.
+
 ### Empaquetado y despliegue
 
 **Nada está desplegado todavía.** El runbook de producción, con lo que falta decidir y la
@@ -372,6 +437,10 @@ gateway, historial y aislamiento del historial entre tenants.
 
 `ProcessDefinitionValidationSpec` valida todo `.bpmn20.xml` commiteado (ver
 `src/main/resources/processes/README.md`).
+
+El despliegue completo se ensayó en local, en modo `production` y desde el jar ejecutable, contra
+una base que hace de producción — es lo que está en `PLAN_FLOWABLE_BPMPLUS.md`, sección *Ensayo
+local del despliegue*. Ese ensayo es el que destapó el fallo del login y el de la primera cuenta.
 
 Además se comprobó a mano, sobre la aplicación corriendo:
 

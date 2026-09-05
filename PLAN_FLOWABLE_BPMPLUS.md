@@ -1,7 +1,8 @@
 # Plan de trabajo: incorporación de Flowable a BPMPLUS
 
 > **Estado (2026-09-05):** plan completo — Fases 0 a 6 ejecutadas y verificadas. El código está
-> **listo para desplegar pero no desplegado**: desde la máquina de desarrollo no hay a dónde
+> **listo para desplegar pero no desplegado**: desde la máquina de desarrollo no hay a dónde. El
+> runbook completo sí se ensayó en local, en modo `production` y desde el jar
 > (ver [Puesta en producción](#puesta-en-producción)). Otras dos salvedades, anotadas en sus
 > fases: la imagen Docker no se pudo construir y la suite de la Fase 5 no cubre timers ni tareas
 > asíncronas, porque el ejecutor asincrónico está apagado.
@@ -321,9 +322,14 @@ la máquina de desarrollo no hay a dónde desplegar. Lo comprobado el 2026-09-05
 | Base de datos de producción (`MYSQL_HOST`, `MYSQL_DATABASE`) | ❌ sin definir |
 | Registro de imágenes | ❌ sin definir |
 | Rama mergeada a `main` | ❌ el trabajo está en una rama aparte |
+| Ensayo del despliegue en local | ✅ runbook completo, ver más abajo |
 
 El único MySQL alcanzable es el `localhost` de desarrollo. Ejecutar el deploy contra eso no sería
 pasar a producción: sería migrar la base de desarrollo con los changesets de producción.
+
+Lo que sí se hizo es **ensayar el despliegue completo en local**, en modo `production` y desde el
+jar, contra una base aparte que hace de maestra. Ver [Ensayo local del
+despliegue](#ensayo-local-del-despliegue): encontró cuatro fallos que sólo se ven así.
 
 > **Esto ya no puede pasar por accidente.** `MigrationRunner` rellenaba `MYSQL_HOST` con
 > `localhost` y `MYSQL_DATABASE` con `bpmplus` cuando no estaban definidas, mientras que el bloque
@@ -336,6 +342,68 @@ pasar a producción: sería migrar la base de desarrollo con los changesets de p
 > $ ./gradlew dbMigrate -Penv=production
 > Faltan variables de conexion para el contexto [production]: MYSQL_HOST, MYSQL_DATABASE.
 > ```
+
+### Ensayo local del despliegue
+
+No hay producción a la que desplegar, pero sí se ejecutó el runbook **completo** en local: el jar
+ejecutable, en modo `production`, contra una base `bpmplus_prod` que hace de maestra. Cubre todo
+menos construir la imagen.
+
+```bash
+export MYSQL_HOST=localhost MYSQL_PORT=3306 MYSQL_DATABASE=bpmplus_prod \
+       MYSQL_USER=root MYSQL_PASSWORD=... GRAILS_ENV=production
+
+./gradlew bootJar
+
+R() { java -cp build/libs/BPMPLUS-0.1.jar \
+        -Dloader.main=bpmplus.migration.MigrationRunner \
+        org.springframework.boot.loader.launch.PropertiesLauncher "$@"; }
+
+R tag v1.0      # etiquetar, con la aplicación apagada
+R migrate       # migrar maestro + cada tenant del registro
+
+# primera cuenta de plataforma: sólo se crea si la base de identidad está vacía
+ADMIN_USERNAME=plataforma ADMIN_PASSWORD='...' \
+  java -XX:MaxRAMPercentage=75 -jar build/libs/BPMPLUS-0.1.jar
+```
+
+Resultado, verificado contra la base:
+
+| Comprobación | Resultado |
+| --- | --- |
+| `dbTag` sobre base virgen | ✅ etiqueta `v1.0` registrada |
+| `dbMigrate` maestro + 2 tenants | ✅ `Schemas de tenant (2): acme, globex` |
+| Tablas de Flowable por cliente | ✅ 32 en `acme`, 32 en `globex` |
+| Tablas de Flowable en la maestra | ✅ ninguna |
+| Arranque de la aplicación | ✅ `environment: production`, 0 errores |
+| Primera cuenta de plataforma | ✅ `plataforma`, sin tenant, bcrypt, con los dos roles |
+| Inicio de sesión | ✅ 302 a `/` |
+| `/actuator/health` anónimo | ✅ `{"status":"UP"}`, sin detalle |
+| `/actuator/health` autenticado | ✅ motor 7.2.0.2, `tenants: [acme, globex]` |
+
+### Lo que encontró el ensayo
+
+Cuatro cosas que ninguna prueba unitaria habría encontrado, porque sólo aparecen con la aplicación
+empaquetada, en modo producción y con varios tenants enganchados.
+
+1. **El login iba a la base de un cliente.** `Table 'acme.user' doesn't exist`. La identidad vive
+   en el schema maestro, pero las conexiones volvían al pool apuntando al último tenant que las
+   usó, y la consulta heredaba ese schema. Intermitente, según qué conexión tocara. Se cierra
+   configurando el `catalog` del pool y cambiando de schema con `setCatalog` en vez de `USE`.
+
+2. **Un despliegue nuevo quedaba sin nadie que pudiera entrar.** Los roles sólo se creaban en
+   desarrollo, y la cuenta también. La documentación decía que en producción las cuentas se crean
+   «desde la consola», pero la consola exige una cuenta: circular. Ahora hay arranque en frío, y
+   sólo con `ADMIN_PASSWORD` explícita y la base de identidad vacía.
+
+3. **`dbTag` fallaba en el primer despliegue.** Etiquetar recorre los tenants del registro, y en
+   ese momento la tabla `tenant` todavía no existe. Justo el único despliegue en que no hay nada a
+   que volver.
+
+4. **`setCatalog` no falla donde `USE` sí.** GORM decide si tiene que crear el schema de un tenant
+   probando a usarlo, y el `DataSource` que entrega es un `LazyConnectionDataSourceProxy`, donde
+   `setCatalog` sólo se anota. Por eso el handler hace las dos cosas: `USE` para fallar a tiempo,
+   `setCatalog` para que el driver y el pool se enteren.
 
 ### Qué falta decidir antes del primer despliegue
 
